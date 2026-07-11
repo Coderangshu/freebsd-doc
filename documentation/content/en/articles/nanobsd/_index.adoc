@@ -122,7 +122,7 @@ Create a minimal configuration file in user directory, for example [.filename]#~
 # echo default > ~/mynano.conf
 ....
 
-The line activates the default plan: a GPT partition layout that supports both BIOS and UEFI boot and enables the A/B upgrade mechanism used in <<step-upgrade>>.
+The line activates the default plan: a GPT partition layout that supports both BIOS and UEFI boot.
 Without it, NanoBSD falls back to the legacy MBR layout with a warning.
 See <<config-options>> for details on plans.
 
@@ -139,7 +139,7 @@ The `-n` flag preserves previously downloaded files between runs: with `-P`, it 
 ==== Detour: Using Distribution Sets Instead of pkgbase
 
 By default, `-P` fetches the base system as pkgbase packages.
-To use traditional distribution sets ([.filename]#base.txz#, [.filename]#kernel.txz#) instead (for example, when targeting an older FreeBSD release without pkgbase support) set `NANO_NOPKGBASE` to a non-empty value:
+To use traditional distribution sets ([.filename]#base.txz#, [.filename]#kernel.txz#) instead (e.g., when targeting an older FreeBSD release without pkgbase support) set `NANO_NOPKGBASE` in [.filename]#mynano.conf# to a non-empty value:
 
 [source,shell]
 ....
