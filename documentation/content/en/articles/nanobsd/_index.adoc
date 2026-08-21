@@ -155,14 +155,14 @@ Everything else in the build process remains the same.
 NanoBSD ships a set of pre-defined shell functions, in [.filename]#customizations.sh#, that modify the image at build time like enabling a service, editing a configuration file, installing a set of files.
 Each one is registered in the configuration file by listing it in `NANO_CUSTOMIZE`.
 
-Two of them are used together here:
+Key built-in functions include:
 
 * `cust_allow_ssh_root` - edits [.filename]#/etc/ssh/sshd_config# to allow `root` to log in over man:sshd[8].
-* `cust_install_files` - copies the plan's [.filename]#Files# tree into the image. This is where the [.filename]#update#, [.filename]#rollback#, [.filename]#save_cfg#, [.filename]#save_sshkeys# and [.filename]#change_password# administration scripts used in later steps come from; without registering this function, none of them are present on the appliance.
+* `cust_install_files` - copies the plan's [.filename]#defaults/Files# tree into the image. This is where the [.filename]#update#, [.filename]#rollback#, [.filename]#save_cfg#, [.filename]#save_sshkeys# and [.filename]#change_password# administration scripts used in later steps come from; without registering this function, none of them are present on the appliance.
+* `cust_adduser` - patches man:adduser[8] so that adding user accounts on a running appliance remounts the root filesystem read-write and automatically persists password database files and SSH keys to [.filename]#/cfg#.
+* `cust_comconsole` - enables the serial console (COM1) instead of the VGA getty; add it to `NANO_CUSTOMIZE` if logging in over a serial port instead of a physical keyboard/monitor.
 
-A third function, `cust_comconsole`, enables the serial console (COM1) instead of the VGA getty; add it to `NANO_CUSTOMIZE` below as well if logging in over a serial port instead of a physical keyboard/monitor.
-
-Add both to [.filename]#~/mynano.conf#:
+Add `cust_allow_ssh_root` and `cust_install_files` to [.filename]#~/mynano.conf#:
 
 [source,shell]
 ....
@@ -182,7 +182,7 @@ This is the first image worth flashing. Flash it onto a storage device:
 
 [source,shell]
 ....
-# dd if=/usr/obj/nanobsd.full/_.disk.full of=/dev/da0 bs=64k
+# dd if=/usr/obj/nanobsd.full/_.disk.full of=/dev/da0 bs=1m conv=sync status=progress
 ....
 
 Replace [.filename]#da0# with the correct device for the target media:
@@ -273,30 +273,32 @@ $ ssh root@myappliance
 `myappliance` is a placeholder for the device's actual IP address or hostname; use the address just configured with `ifconfig` at the console.
 ====
 
-NanoBSD ships a few other pre-defined functions the same way, such as `cust_comconsole` (see <<step3-builtin-functions>>) and `cust_pkgng` (package installation, used in <<step-packages>>).
+NanoBSD ships a few other pre-defined functions the same way, such as `cust_comconsole`, `cust_adduser` (see <<step3-builtin-functions>>) and `cust_pkgng` (package installation, used in <<step-packages>>).
 They, and the three build stages they can be registered for (`NANO_CUSTOMIZE`, `NANO_EARLY_CUSTOMIZE`, `NANO_LATE_CUSTOMIZE`), are listed in full in <<cust-functions>>.
 
 [[step-packages]]
 === Step 4: Add Packages
 
 NanoBSD installs ports packages into the image at build time using man:pkg[8] via the `cust_pkgng` customization hook.
-`cust_pkgng` always needs `NANO_PKGLIST`, a text file listing one port origin or package name per line:
+`cust_pkgng` requires `NANO_PKGLIST`, a text file listing one port origin or package name per line.
+Create it, then point [.filename]#~/mynano.conf# at it:
 
 [source,shell]
 ....
-# /usr/src/tools/tools/nanobsd/conf/pkglist
-dns/dnsmasq
+# echo dns/dnsmasq >> ~/mynano.pkglist
+# echo sysutils/tmux >> ~/mynano.pkglist
 ....
-
-With `NANO_PACKAGE_DIR` unset, `cust_pkgng` fetches everything on the list, plus dependencies, from the online FreeBSD package repository into the local cache and installs it with man:pkg[8]:
 
 [source,shell]
 ....
 default
 
-NANO_PKGLIST="/usr/src/tools/tools/nanobsd/conf/pkglist"
+NANO_PKGLIST="/root/mynano.pkglist"
 NANO_CUSTOMIZE="cust_allow_ssh_root cust_install_files cust_pkgng"
 ....
+
+`cust_pkgng` fetches everything on the list, plus runtime dependencies, from the FreeBSD package repository and installs them into the image with man:pkg[8].
+Alternatively, setting `NANO_PACKAGE_DIR` to a local directory of prebuilt packages (for example, a Poudriere repository's [.filename]#All# directory) installs from there instead of the network; the build aborts if anything on the list, or any of its dependencies, is missing from that directory.
 
 This is the simplest option and needs nothing beyond the package list file.
 
@@ -377,7 +379,7 @@ This is the same one-time boot mechanism <<step-upgrade>> uses, just pointed at 
 [[advanced-tinkering]]
 == Advanced Tinkering
 
-Writing your own customization functions, building packages with Poudriere, the loader-level automatic fallback mechanism, and custom source builds are all useful once the core walkthrough above feels comfortable, but none of them are required to get a working appliance.
+Writing your own customization functions, provisioning via cloud-init, persistent storage, encrypted swap, custom/precompiled kernel selection, unprivileged builds, the loader-level automatic fallback mechanism, and custom source builds are all useful once the core walkthrough above feels comfortable, but none of them are required to get a working appliance.
 
 [[step3-custom-functions]]
 === Add Your Own Customization Functions
@@ -407,30 +409,116 @@ Rebuild and flash the image as in <<step3-builtin-functions>>, boot it, and chec
 nanobsd-demo
 ....
 
-[[adv-poudriere]]
-=== Building Packages with Poudriere
+Another common customization is pre-installing SSH public keys at build time to allow `root` or non-root users to log in seamlessly and securely without relying on passwords or manual console configuration.
 
-To control exactly what goes into the packages (pinned versions, local patches, non-default options) build them with Poudriere instead of pulling from the network.
-See the extref:{handbook}ports/#ports-poudriere[Poudriere section of the FreeBSD Handbook] for setting up a jail, ports tree, and running a bulk build.
-
-Point `NANO_PACKAGE_DIR` at the repository's `All` directory:
+Combining `cust_allow_ssh_root` (which permits root logins in [.filename]#/etc/ssh/sshd_config#) with a custom function to copy and set permissions on authorized keys prepares the image for key-based authentication:
 
 [source,shell]
 ....
 default
 
-NANO_PKGLIST="/usr/src/tools/tools/nanobsd/conf/pkglist"
-NANO_PACKAGE_DIR="/usr/local/poudriere/data/packages/nanobsd-latest/All"
-NANO_CUSTOMIZE="cust_allow_ssh_root cust_install_files cust_pkgng"
+cust_ssh_keys () (
+	mkdir -p ${NANO_WORLDDIR}/etc/ssh/authorized_keys
+	chmod 0755 ${NANO_WORLDDIR}/etc/ssh/authorized_keys
+
+	# Pre-authorize root user
+	cp /path/to/id_ed25519.pub ${NANO_WORLDDIR}/etc/ssh/authorized_keys/root
+	chmod 0600 ${NANO_WORLDDIR}/etc/ssh/authorized_keys/root
+	chown root:wheel ${NANO_WORLDDIR}/etc/ssh/authorized_keys/root
+
+	# Pre-authorize another user (e.g., $USER)
+	cp /path/to/user_id_ed25519.pub ${NANO_WORLDDIR}/etc/ssh/authorized_keys/${USER}
+	chmod 0600 ${NANO_WORLDDIR}/etc/ssh/authorized_keys/${USER}
+	chown ${USER}:${USER} ${NANO_WORLDDIR}/etc/ssh/authorized_keys/${USER}
+
+	# Ensure sshd looks for authorized keys in /etc/ssh/authorized_keys/%u
+	echo 'AuthorizedKeysFile /etc/ssh/authorized_keys/%u .ssh/authorized_keys' >> ${NANO_WORLDDIR}/etc/ssh/sshd_config
+)
+
+NANO_CUSTOMIZE="cust_allow_ssh_root cust_install_files cust_ssh_keys"
 ....
 
-With `NANO_PACKAGE_DIR` set, `cust_pkgng` resolves the full dependency graph for the package list against that directory, and aborts the build if anything listed (or any of its dependencies) is missing from the repository.
+Key points to remember:
 
-Build the updated image the same way as in <<step-packages>>:
+* `cust_allow_ssh_root` enables root login via OpenSSH in [.filename]#/etc/ssh/sshd_config#.
+* Public keys are copied into [.filename]#/etc/ssh/authorized_keys/$USER#.
+* Permissions on key files must be restricted with `chmod 0600 /etc/ssh/authorized_keys/$USER`.
+* Ownership must be assigned with `chown user:user` for regular users and `chown root:wheel` for `root`.
+* NanoBSD's GPT layout defaults already point OpenSSH to [.filename]#/etc/ssh/authorized_keys/%u#.
+
+[[adv-cidata]]
+=== Provisioning with Cloud-Init (CIDATA Partition)
+
+For automated appliance provisioning in virtualized or cloud environments (and single-board computers), NanoBSD supports creating an optional MS-DOS FAT partition labeled `cidata`.
+This partition is read by cloud-init utilities like extref:{handbook}virtualization/#nuageinit[nuageinit] to inject user metadata, network configuration, and SSH credentials on first boot.
+
+Set `NANO_CIDATA_SIZE` in the configuration file to create and format the partition (mounted at [.filename]#/boot/cidata#):
 
 [source,shell]
 ....
-# sh nanobsd.sh -nP -c ~/mynano.conf
+default
+
+NANO_CIDATA_SIZE=50m
+....
+
+[[adv-storage]]
+=== Persistent Storage and Encrypted Swap
+
+NanoBSD's read-only root guarantees immutability, but appliances frequently need dedicated partitions for persistent data logs or swap space.
+
+* **Persistent Data Partition**: Setting `NANO_DATASIZE` allocates a dedicated data partition labeled `data`. Setting `NANO_DATASIZE=-1` expands the partition to use all remaining space on the storage media. The GPT plan automatically generates an entry in [.filename]#/etc/fstab# mounting `/dev/gpt/${NANO_PARTITION_DATA}` at [.filename]#/data#:
+
+[source,shell]
+....
+default
+
+NANO_DATASIZE=2G
+....
+
+* **Encrypted Swap**: NanoBSD can automatically provision an encrypted swap partition using man:geli[8]. The swap size must be at least `100MiB`:
+
+[source,shell]
+....
+default
+
+NANO_SWAP_SIZE=1G
+NANO_SWAP_ENCRYPTION=true
+....
+
+[[adv-kernel-override]]
+=== Precompiled Kernel Selection and Loader Overrides
+
+When using `-P` (precompiled pkgbase builds), NanoBSD defaults to the `generic` kernel package (`FreeBSD-kernel-generic`), listed in `NANO_PKGBASE_LIST`.
+Alternate kernel flavors are chosen by naming the flavored package instead, not by setting `NANO_KERNEL` directly; only the `nodebug` and `mmccam` flavors are recognized:
+
+[source,shell]
+....
+default
+
+NANO_PKGBASE_LIST="FreeBSD-set-base FreeBSD-kernel-generic-nodebug"
+....
+
+NanoBSD detects the `FreeBSD-kernel-generic-nodebug` package in `NANO_PKGBASE_LIST`, downloads it, and derives and sets `NANO_KERNEL` and `NANO_LOADER_KERNEL` accordingly, configuring `loader.conf` to match.
+For a source build (no `-P`), set `NANO_KERNEL` directly to a kernel configuration file name instead; the matching pkgbase kernel package name is then derived from it.
+
+To point the boot loader at a custom kernel directory inside [.filename]#/boot#, set `NANO_LOADER_KERNEL`:
+
+[source,shell]
+....
+NANO_LOADER_KERNEL="kernel.custom"
+....
+
+If additional kernel modules built from ports are required, point `NANO_KMODS_DIR` at the directory containing `FreeBSD-ports-kmods` packages.
+
+[[adv-nopriv-build]]
+=== Building Unprivileged Images (-U)
+
+NanoBSD can assemble complete disk images without `root` privileges by passing the `-U` flag to [.filename]#nanobsd.sh#.
+During an unprivileged build, file ownership and permissions are tracked via an internal specification file (metalog) processed by man:makefs[8] and man:mkimg[1] without requiring root-only operations like man:chroot[8] or man:md[4] devices:
+
+[source,shell]
+....
+$ sh nanobsd.sh -nPU -c ~/mynano.conf
 ....
 
 [[adv-auto-fallback]]
@@ -470,12 +558,6 @@ Confirm it afterwards from the appliance:
 ....
 
 `vfs.root.mountfrom` still names `code1`; the log carries a "Boot from ... failed." line for `code2`, and by the time this is checked `bootfailed` has already been cleared automatically as part of that same successful boot.
-
-[NOTE]
-====
-Setting `NANO_BACKUP_PART=1` in the configuration file adds a third, "golden" code partition that is populated at image build time and never touched by upgrades.
-It carries a permanent `bootme` attribute and serves as a last-resort fallback should both A/B partitions become unbootable.
-====
 
 [[step8-custom-build]]
 === Custom Source Builds
@@ -537,10 +619,16 @@ For the complete set of configuration options for trimming and customizing the b
 === The Design of NanoBSD
 
 Once the image is present on the medium, it is possible to boot NanoBSD.
-The mass storage medium is divided into three parts by default:
+NanoBSD supports two on-disk partitioning schemes:
 
-* Two image partitions: `code#1` and `code#2`.
-* The configuration file partition, which can be mounted under the [.filename]#/cfg# directory at run time.
+* **`default` plan (GPT)**: Modern layout with dual BIOS and UEFI boot support, dynamic partition sizing, and labeled partitions. The storage medium is divided into:
+** Two code partitions (`code1` and `code2`) providing an active/standby A/B pair for atomic updates and rollbacks.
+** The configuration file partition ([.filename]#/cfg#), mounted read-only at boot time and mounted read-write when saving configuration changes.
+** An optional EFI System Partition (`efiboot0`) for UEFI boot.
+** An optional persistent data partition ([.filename]#/data#, configured via `NANO_DATASIZE`).
+** An optional cloud-init configuration data partition ([.filename]#/boot/cidata#, configured via `NANO_CIDATA_SIZE`).
+** An optional encrypted or unencrypted swap partition (`swap0`, configured via `NANO_SWAP_SIZE`).
+* **`legacy` plan (MBR)**: Classic 3-slice layout (`code#1`, `code#2`, and `cfg`) using legacy BIOS MBR partitioning and fixed slice geometry.
 
 These partitions are normally mounted read-only.
 
@@ -594,7 +682,7 @@ The necessary commands to build a NanoBSD image are:
 # cd /usr/src/tools/tools/nanobsd <.>
 # sh nanobsd.sh <.>
 # cd /usr/obj/nanobsd.full <.>
-# dd if=_.disk.full of=/dev/da0 bs=64k <.>
+# dd if=_.disk.full of=/dev/da0 bs=1m conv=sync status=progress <.>
 ....
 
 <.> Change the current directory to the base directory of the NanoBSD build script.
@@ -657,11 +745,11 @@ Assuming the script is run with no particular options, this is what will happen.
 . `nano_fetch_pkgbase_packages` or `nano_fetch_distsets`: Obtain the base system, either as FreeBSD-base (pkgbase) packages, or as distribution sets such as [.filename]#base.txz# and [.filename]#kernel.txz# fetched from a FreeBSD mirror and verified against `MANIFEST`. For an unprivileged build (`-U`), `nano_pkgbase_reset_metalog` clears any existing metalog (the actual metalog is then generated by man:pkg-install[8]), or `nano_distset_metalog` generates the metalog from the distribution sets.
 . `clean_world`: Clean the destination directory.
 . `make_conf_install`: Assemble man:make.conf[5] from the `CONF_WORLD` and `CONF_INSTALL` variables. (Only for a source build.)
-. `install_world` or `install_precompiled_world`: Install all files built during `buildworld`, or, with `-P`, unpack the pre-compiled world.
+. `install_world` or `install_world_binaries`: Install all files built during `buildworld`. `install_world_binaries` is used instead whenever the base system comes from pkgbase packages (with or without `-P`) or, with `-P` and `NANO_NOPKGBASE` set, from distribution sets.
 . `install_etc`: Install the necessary files in the [.filename]#/etc# directory, based on the `make distribution` command. (Only for a source build.)
 . `native_xtools`: With `-X`, build and install the native cross-tools into the image.
 . `setup_nanobsd_etc`: The first configuration specific to NanoBSD takes place at this stage. The [.filename]#/etc/diskless# is created and the root filesystem is defined as read-only.
-. `install_kernel` or `install_precompiled_kernel`: The kernel and modules files are installed, either from the build or from the pre-compiled binaries.
+. `install_kernel` or `install_kernel_binaries`: The kernel and modules files are installed, either from the build or, when pkgbase is in use (with or without `-P`) or with `-P` and `NANO_NOPKGBASE` set, from packages or distribution sets.
 . `patch_precompiled`: When installing pre-compiled distribution sets (`-P` with pkgbase disabled), reconcile the freebsd-update index with the metalog.
 . `run_customize`: All the customizing routines defined by the user will be called.
 . `setup_nanobsd`: A special configuration directory layout is setup. The [.filename]#/usr/local/etc# gets moved to [.filename]#/etc/local# and a symbolic link is created back from [.filename]#/etc/local# to [.filename]#/usr/local/etc#.
@@ -711,7 +799,7 @@ The most important directives are:
 * `CONF_WORLD` - Options passed to both the `buildworld` and the `installworld` stage of the build.
 * `FlashDevice` - Defines what type of media to use. Check [.filename]#FlashDevice.sub# for more details.
 
-NanoBSD now supports more than one on-disk layout, selected through a "plan".
+NanoBSD supports two on-disk plans: the legacy MBR layout and the default GPT layout.
 A plan is a pluggable module that provides the partition layout, boot setup, and disk image assembly functions for a given scheme.
 Plans are sourced on demand by calling the plan's name as a function inside the configuration file.
 Currently two plans are available: the legacy MBR layout (loaded automatically if no plan is selected) and the default GPT layout, selected by calling `default`:
@@ -721,17 +809,19 @@ Currently two plans are available: the legacy MBR layout (loaded automatically i
 default
 ....
 
-This sources [.filename]#default.sh# from the NanoBSD tool directory, sets `NANO_PLAN=default`, and activates all GPT-specific functions.
+This sets `NANO_PLAN=default` and activates all GPT-specific partitioning and booting functions.
 Without this call, NanoBSD falls back to the legacy MBR layout with a warning.
 
-* `NANO_PLAN` - Selects the partitioning and boot scheme. When left unset, the legacy man:gpart[8] MBR layout is used (a warning is printed). Calling the `default` function in the configuration file switches to the GPT layout. The legacy plan still drives the older variables `NANO_NEWFS`, `NANO_BOOT0CFG`, and `NANO_BOOTLOADER`, while the default plan uses `NANO_MAKEFS` and adds the variables below.
+* `NANO_PLAN` - Selects the partitioning and boot scheme (`default` for GPT, `legacy` for MBR). The legacy plan uses sector-based geometry (`NANO_HEADS`, `NANO_SECTS`, `NANO_BOOT0CFG`), while the default GPT plan uses `makefs` and human-readable byte sizes.
 * `NANO_BOOT_TYPE` - For the default plan, a space-separated list of boot methods to support: `BIOS`, `UEFI`, or both (the default). For UEFI boot, the image carries a single EFI System Partition (`efiboot0`) with man:gptboot[8]'s `gptboot.efi` on the removable-media path, so both BIOS and UEFI boots select the root partition through the GPT `bootme`/`bootonce` attributes; EFI NVRAM is never touched.
-* `NANO_EFI_BOOTPART_SIZE` - Size, in 512-byte sectors, of the EFI System Partition created for UEFI boot.
+* `NANO_EFI_BOOTPART_SIZE` - Size of the EFI System Partition created for UEFI boot (e.g. `260M`).
 * `NANO_LABEL` - Base man:glabel[8] label used to refer to partitions by name (for example [.filename]#/dev/gpt/code1#) instead of by device.
 * `NANO_LAYOUT` - Optional label appended to the object directory and image names, so several layouts of the same build can coexist.
 * `NANO_PARTITION_ROOT`, `NANO_PARTITION_ALTROOT` - Numeric indices (default `1` and `2`) of the A/B code partitions in the GPT layout. Together with `NANO_LABEL` they form the full GPT partition labels `NANO_ROOT` and `NANO_ALTROOT` (e.g., `code1` and `code2`), which are also written to [.filename]#/etc/nanobsd.conf# on the appliance.
-* `NANO_BACKUP_PART` - When set to `1`, adds a third "golden" code partition (index `NANO_PARTITION_BACKUP`, default `3`) that is populated at build time, never modified by upgrades, and carries a permanent `bootme` attribute as a last-resort boot fallback.
 * `NANO_PARTITION_CFG`, `NANO_PARTITION_DATA` - GPT labels for the configuration and data partitions (default `cfg` and `data`).
+* `NANO_CIDATA_SIZE` - Size of an optional MS-DOS FAT partition labeled `cidata` mounted at [.filename]#/boot/cidata#, used for automated cloud-init (`nuageinit`) provisioning.
+* `NANO_LOADER_KERNEL` - Kernel directory in [.filename]#/boot# to load via [.filename]#loader.conf#.
+* `NANO_KMODS_DIR` - Path to ports kernel modules (`FreeBSD-ports-kmods`) packages.
 
 The base system can be assembled from FreeBSD-base (pkgbase) packages, which is now the default:
 
@@ -757,9 +847,9 @@ Other frequently useful options:
 
 * `NANO_MAKEFS` - Parameters passed to man:makefs[8] when building the image for the default/GPT plan (default `-o softupdates=1,version=2`, UFS-specific). This replaces the older `NANO_NEWFS`, which is now used only by the legacy plan.
 * `NANO_SECTOR_SIZE` - Logical sector size, in bytes, of the target media.
-* `NANO_SWAP_SIZE` - Size of an optional swap partition, in 512-byte sectors (0 by default, which disables it).
+* `NANO_SWAP_SIZE` - Size of an optional swap partition (e.g. `1G`, minimum `100MiB`; 0 by default, which disables it).
 * `NANO_SWAP_ENCRYPTION` - When non-empty, encrypts the swap partition with man:geli[8].
-* `NANO_MD_BACKING` - Backing type for the man:md[4] devices, either `file` or `swap`.
+* `NANO_MD_BACKING` - Legacy MBR plan only. Backing type for the man:md[4] devices, either `file` or `swap`.
 * `NANO_IMAGES` - Number of code partitions to create (default `2` for an active/standby pair; set to `1` for a single-partition layout).
 * `NANO_INIT_IMG2` - When `NANO_IMAGES` is greater than `1`, controls whether the second code partition is initialized as a copy of the first (`1`, the default) or left as zeroed space (`0`).
 * `NANO_CFGDIR`, `NANO_METALOG_CFG` - Directory to pre-populate the [.filename]#/cfg# partition from, and a matching metalog specifying ownership for the copied files. Both default to empty, leaving the partition created but unpopulated.
@@ -816,14 +906,12 @@ Be sure to check the relevant parameters of the serial port, as setting a bad pa
 In the end of the boot process is the disk image creation.
 With this step, the NanoBSD script provides a file that can simply be copied onto a disk for the appliance, and that will make it boot and start.
 
-There are many variables that need to be set just right for the script to produce a usable disk image.
+All partition and media sizes in the default GPT plan accept human-readable byte values with standard units (such as `1G`, `500M`, `100MiB`, `64k`), parsed using `strtobytes`. Legacy MBR plan configurations continue to use 512-byte sectors.
 
 * The `NANO_DRIVE` variable must be set to the drive name of the media at runtime. Usually, the default value `ada0`, which represents the first `IDE`/`ATA`/`SATA` device on the appliance is expected to be the correct one, but a different type of storage could also be used - like a USB key, in which case, it would rather be `da0`.
-* The `NANO_MEDIASIZE` variable must be set to the size (in 512-byte sectors) of the storage media that will be used. If you set it wrong, it is possible that the NanoBSD image will not boot at all, and a message at boot time will be warning about incorrect disk geometry.
-
-* The [.filename]#/etc#, [.filename]#/var#, and [.filename]#/tmp# directories are allocated as man:md[4] (malloc) disks at boot time; so their sizes can be tailored to suit the appliance needs. The `NANO_RAM_ETCSIZE` variable sets the size of the [.filename]#/etc#; and the `NANO_RAM_TMPVARSIZE` variable sets the size of both the [.filename]#/var# and [.filename]#/tmp# directory, as [.filename]#/tmp# is symbolically linked to [.filename]#/var/tmp#. By default, both malloc disks sizes are set at 20MB each. They can always be changed, but usually the [.filename]#/etc# does not grow too much in size, so 20MB is a good starting point, whereas the [.filename]#/var# and especially [.filename]#/tmp# can grow much larger if not careful about it. For memory constrained systems, smaller filesystem sizes may be chosen.
-* As NanoBSD is mainly designed to build a system image for an appliance, it is assumed that the storage media used will be relatively small. For that reason, the filesystem that is laid out is configured to have a small block size (4Kb) and a small fragment size (512b). The configuration options of the filesystem can be modified through the `NANO_NEWFS` variable, but the syntax must respect the man:newfs[8] command format. Also, by default, the filesystem has Soft Updates enabled. The extref:{handbook}[FreeBSD Handbook] can be checked about this.
-* The different partition sizes can be set through the use of `NANO_CODESIZE`, `NANO_CONFSIZE`, and `NANO_DATASIZE` as a multiple of 512-byte sectors. `NANO_CODESIZE` defines the size of the first two image partitions: `code#1` and `code#2`. They have to be big enough to hold all the files that will be produced as a result of the `buildworld` and `buildkernel` processes. `NANO_CONFSIZE` defines the size of the configuration file partition, so it does not need to be very big; but do not make it so small that it will not hold all configuration files. Finally, `NANO_DATASIZE` defines the size of an optional partition, that can be used on the appliance. The last partition can be used, for example, to keep files created on the fly on disk.
+* The `NANO_MEDIASIZE` variable must be set to the total size of the storage media that will be used (e.g., `4G`).
+* The [.filename]#/etc#, [.filename]#/var#, and [.filename]#/tmp# directories are allocated as man:md[4] (malloc) disks at boot time; so their sizes can be tailored to suit the appliance needs. The `NANO_RAM_ETCSIZE` variable sets the size of [.filename]#/etc#; and the `NANO_RAM_TMPVARSIZE` variable sets the size of both [.filename]#/var# and [.filename]#/tmp#, as [.filename]#/tmp# is symbolically linked to [.filename]#/var/tmp#.
+* The partition sizes can be configured via `NANO_CODESIZE`, `NANO_CONFSIZE`, `NANO_DATASIZE`, and `NANO_CIDATA_SIZE`. `NANO_CODESIZE` defines the size of the image partitions (`code1` and `code2`). `NANO_CONFSIZE` defines the size of the configuration file partition (default `1Mi`). `NANO_DATASIZE` allocates an optional persistent data partition (set to `-1` to occupy all remaining space). `NANO_CIDATA_SIZE` creates an MS-DOS cloud-init partition mounted at [.filename]#/boot/cidata#.
 
 [[cust-functions]]
 ==== Custom Functions
@@ -858,28 +946,31 @@ Two more variables (with matching wrappers) cover the other customization stages
 * `NANO_EARLY_CUSTOMIZE` (`early_customize_cmd`) - Runs at the very beginning of the build, before `buildworld`, during the `run_early_customize` step.
 * `NANO_LATE_CUSTOMIZE` (`late_customize_cmd`) - Runs just before disk image creation, during the `run_late_customize` step.
 
-There are a few default pre-defined customization functions ready for use, defined in [.filename]#customize.subr# in the NanoBSD tool directory:
+There are a few default pre-defined customization functions ready for use, defined in [.filename]#customizations.sh# in the NanoBSD tool directory:
 
 * `cust_comconsole` - Disables man:getty[8] on the VGA devices (the [.filename]#/dev/ttyv*# device nodes) and enables the use of the COM1 serial port as the system console.
 * `cust_allow_ssh_root` - Allow `root` to login via man:sshd[8].
-* `cust_install_files` - Installs files from the directory given by `NANO_CUST_FILESDIR` (by default [.filename]#nanobsd/Files#; the default plan sets it to [.filename]#nanobsd/gpt/Files#), which contains some useful scripts for system administration. When `NANO_CUST_FILES_MTREE` points to an man:mtree[8] file, it is applied to set ownership and permissions of the installed files.
-* `cust_pkgng` - Installs the packages listed in `NANO_PKGLIST` (required) plus their dependencies, using man:pkg[8]. With `NANO_PACKAGE_DIR` set, it installs from that directory (e.g. a Poudriere repository) and verifies the full dependency graph is present there before touching the image; otherwise it downloads everything from the online FreeBSD package repository (see <<step-packages>>).
+* `cust_install_files` - Installs files from the directory given by `NANO_CUST_FILESDIR` (by default [.filename]#nanobsd/defaults/Files#; legacy plan uses [.filename]#nanobsd/Files#), which contains useful scripts for system administration. When `NANO_CUST_FILES_MTREE` points to an man:mtree[8] file (e.g. [.filename]#nanobsd/defaults/Files.mtree#), it is applied to set ownership and permissions of the installed files.
+* `cust_pkgng` - Installs the packages listed in the `NANO_PKGLIST` file plus their dependencies, using man:pkg[8]. With `NANO_PACKAGE_DIR` set, installs from that local directory (e.g. a Poudriere repository) instead of the online FreeBSD package repository. The legacy MBR plan redefines this function entirely: it ignores `NANO_PKGLIST` and instead bootstraps man:pkg[8] from old-style packages found via `NANO_PACKAGE_DIR` (default a local [.filename]#Pkg# directory) and `NANO_PACKAGE_LIST` (a glob pattern, default `*`).
+* `cust_adduser` - Patches man:adduser[8] so that adding user accounts on a running appliance remounts `/` read-write and automatically synchronizes the password database and SSH authorized keys to [.filename]#/cfg#.
 
 ==== Adding Packages
 
-Packages can be added to a NanoBSD image, to provide specific functionalities on the appliance. To do so, either:
+Packages can be added to a NanoBSD image to provide specific functionalities on the appliance.
+To install packages at build time, list the desired package origins in a `NANO_PKGLIST` file and add `cust_pkgng` to `NANO_CUSTOMIZE`:
 
-* Add the `cust_pkgng` to the `NANO_CUSTOMIZE` variable, or
-* Add a `'customize_cmd cust_pkgng'` command in a customized configuration file.
+[source,shell]
+....
+default
 
-Both methods achieve the same result: launching the `cust_pkgng` routine.
-This routine installs the packages listed in the `NANO_PKGLIST` file, either from `NANO_PACKAGE_DIR` if set, or otherwise from the online FreeBSD package repository (see <<step-packages>>).
+NANO_PKGLIST="/root/mynano.pkglist"
+NANO_CUSTOMIZE="cust_allow_ssh_root cust_install_files cust_pkgng"
+....
 
-It is common, when installing applications through pkg on a standard FreeBSD environment, that the install process puts configuration files, in the [.filename]#usr/local/etc# directory, and startup scripts in the [.filename]#/usr/local/etc/rc.d# directory.
-So, after the required packages have been installed, they need to be configured in order for them to start right out of the box.
-To do so, the necessary configuration files have to be installed in the correct directories.
-This can be achieved by writing dedicated routines or the generic `cust_install_files` routine can be used to lay out files properly from the [.filename]#/usr/src/tools/tools/nanobsd/Files# directory.
-Usually a statement, sometimes multiple statements, in the [.filename]#/etc/rc.conf# also needs to be added for each package.
+`cust_pkgng` bootstraps man:pkg[8] and installs the specified packages and their runtime dependencies directly into the image.
+
+It is common, when installing applications through pkg on a standard FreeBSD environment, that the install process puts configuration files in the [.filename]#/usr/local/etc# directory and startup scripts in [.filename]#/usr/local/etc/rc.d#.
+To start services out of the box, necessary configuration files can be copied via `cust_install_files` or custom functions, and the required enable flags can be appended to [.filename]#/etc/rc.conf#.
 
 ==== Configuration File Example
 
