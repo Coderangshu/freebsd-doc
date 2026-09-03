@@ -111,6 +111,11 @@ When complete, output files appear in [.filename]#/usr/obj/nanobsd.full/#:
 
 This is a working, bootable NanoBSD image, built without touching a line of source or a config file.
 
+[NOTE]
+====
+NanoBSD prints only a one-line progress summary per stage to the terminal. If a stage fails, the actual error is written to a per-stage log file under [.filename]#/usr/obj/nanobsd.${NANO_NAME}#, not to the terminal. See <<troubleshooting>> for how to find and read it.
+====
+
 [[step2-config-file]]
 === Step 2: Customize with a Configuration File
 
@@ -611,6 +616,55 @@ The advantages of a source build include:
 * `-P`, `NANO_NOPKGBASE=1`: fetches distribution sets ([.filename]#base.txz#, [.filename]#kernel.txz#) and installs by extraction (see <<step2-config-file>>).
 
 For the complete set of configuration options for trimming and customizing the build, see the <<config-options,Configuration Options>> reference section.
+
+[[troubleshooting]]
+=== Troubleshooting Build Failures
+
+Each build stage (downloading, installing, building, image creation, and each customization function) redirects its output to its own log file under [.filename]#${NANO_OBJ}# (by default [.filename]#/usr/obj/nanobsd.${NANO_NAME}#).
+When a stage fails, `nanobsd.sh` stops with no error message on the terminal at all. Its output simply ends after the last progress line, for example:
+
+[source,shell]
+....
+00:02:33 ### log: /usr/obj/nanobsd.full/_.di
+....
+
+That last line names the log file for the stage that was running when the build stopped.
+
+Tail that file for the actual error:
+
+[source,shell]
+....
+# tail -n1 /usr/obj/nanobsd.full/_.di
+Unsupported UEFI partition type 'gpt'
+....
+
+Common per-stage log files, all under [.filename]#${NANO_OBJ}#:
+
+[cols="1,2", options="header"]
+|===
+| Log file | Stage
+
+| [.filename]#_.dl#
+| Downloading pkgbase/distset packages (`-P`)
+
+| [.filename]#_.ds#, [.filename]#_.pds#
+| Installing pkgbase/distset packages into the world directory
+
+| [.filename]#_.bw#, [.filename]#_.bk#
+| `buildworld`, `buildkernel` (source builds)
+
+| [.filename]#_.iw#, [.filename]#_.ik#
+| `installworld`, `installkernel`
+
+| [.filename]#_.cust.<function>#, [.filename]#_.late_cust.<function>#
+| A `NANO_CUSTOMIZE`/`NANO_LATE_CUSTOMIZE` function, named after the function itself
+
+| [.filename]#_.cp#
+| Copying the built world into the code partition image
+
+| [.filename]#_.di#
+| Assembling the final disk image (man:mkimg[1]/man:makefs[8])
+|===
 
 [[howto]]
 == NanoBSD Howto
